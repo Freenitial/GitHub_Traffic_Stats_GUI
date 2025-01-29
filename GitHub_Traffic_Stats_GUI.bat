@@ -10,7 +10,7 @@
 ################################################################################
 # GitHub Traffic Stats
 # Author: Freenitial on GitHub
-# Version : 0.7
+# Version : 0.8
 ################################################################################
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -267,32 +267,38 @@ function Get-GitHubRepositories {
 }
 
 function Get-GitHubTrafficStatsForRepo {
-    param([string]$Owner,[string]$RepoName)
+    param([string]$Owner, [string]$RepoName)
+
     $headers = @{
         Authorization = ("Basic " + [System.Convert]::ToBase64String(
             [System.Text.Encoding]::ASCII.GetBytes("$($Script:GitHubUsername):$($Script:GitHubToken)")
         ))
-        'User-Agent'   = "GitStats-PowerShell"
+        'User-Agent' = "GitStats-PowerShell"
     }
-    $viewsUri  = "https://api.github.com/repos/$Owner/$RepoName/traffic/views"
-    $clonesUri = "https://api.github.com/repos/$Owner/$RepoName/traffic/clones"
-    $refsUri   = "https://api.github.com/repos/$Owner/$RepoName/traffic/popular/referrers"
 
-    $viewsResponse  = Invoke-RestMethod -Uri $viewsUri  -Headers $headers -Method Get
-    $clonesResponse = Invoke-RestMethod -Uri $clonesUri -Headers $headers -Method Get
-    $refsResp       = Invoke-RestMethod -Uri $refsUri   -Headers $headers -Method Get
+    $baseUri = "https://api.github.com/repos/$Owner/$RepoName/traffic"
 
-    [PSCustomObject]@{
-        RepoName         = $RepoName
-        TotalViews       = $viewsResponse.count
-        UniqueViews      = $viewsResponse.uniques
-        TotalClones      = $clonesResponse.count
-        UniqueClones     = $clonesResponse.uniques
-        ViewsDaily       = $viewsResponse.views
-        ClonesDaily      = $clonesResponse.clones
-        PopularReferrers = $refsResp
+    try {
+        $viewsResponse  = Invoke-RestMethod -Uri "$baseUri/views"  -Headers $headers -Method Get
+        $clonesResponse = Invoke-RestMethod -Uri "$baseUri/clones" -Headers $headers -Method Get
+        $referrersResponse = Invoke-RestMethod -Uri "$baseUri/popular/referrers" -Headers $headers -Method Get
+
+        [PSCustomObject]@{
+            RepoName         = $RepoName
+            TotalViews       = $viewsResponse.count
+            UniqueViews      = $viewsResponse.uniques
+            TotalClones      = $clonesResponse.count
+            UniqueClones     = $clonesResponse.uniques
+            ViewsDaily       = $viewsResponse.views
+            ClonesDaily      = $clonesResponse.clones
+            PopularReferrers = if ($referrersResponse -is [System.Array]) { $referrersResponse } else { @($referrersResponse) }
+        }
+    }
+    catch {
+        return $null
     }
 }
+
 
 ################################################################################
 # BUILD UI
@@ -374,7 +380,7 @@ function Update-TitleBarButtons {
 	$formWidth = $form.Width
 	
 	$btnMin = $titleBar.Controls | Where-Object { $_.Text -eq "-" }
-	$btnMax = $titleBar.Controls | Where-Object { $_.Text -eq "□" }
+	$btnMax = $titleBar.Controls | Where-Object { $_.Text -eq "$([char]0x25A1)" }
 	$btnClose = $titleBar.Controls | Where-Object { $_.Text -eq "X" }
 	
 	if ($btnMin -and $btnMax -and $btnClose) {
@@ -420,7 +426,7 @@ function Build-GlobalForm {
 		$titleBar.Controls.Add($button)
 		switch($text) {
 			"-" { $script:btnMin = $button }
-			"□" { $script:btnMax = $button }
+			"$([char]0x25A1)" { $script:btnMax = $button }
 			"X" { $script:btnClose = $button }
 		}
 		return $button
@@ -477,15 +483,29 @@ function Build-GlobalForm {
 		$sender.Parent.Parent.WindowState = [System.Windows.Forms.FormWindowState]::Minimized 
 	}
 
-	$btnMax = Add-TitleBarButton $main $titleBar "□" @(45, 30) 115 {
-		param($sender, $e)
-		$form = $sender.Parent.Parent
-		if ($form.WindowState -eq [System.Windows.Forms.FormWindowState]::Normal) {
-			$form.WindowState = [System.Windows.Forms.FormWindowState]::Maximized
-		} else {
-			$form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
-		}
-	}
+    $btnMax = Add-TitleBarButton $main $titleBar "$([char]0x25A1)" @(45, 30) 115 {
+        param($sender, $e)
+        $form = $sender.Parent.Parent
+
+        if (-not $form.Tag) {
+            # Sauvegarde de la taille et position initiales
+            $form.Tag = @{
+                Bounds = $form.Bounds
+            }
+        }
+
+        if ($form.Tag.Maximized -eq $true) {
+            # Restauration de la taille et position initiales
+            $form.Bounds = $form.Tag.Bounds
+            $form.Tag.Maximized = $false
+        } else {
+            # Passage en mode maximisé tout en respectant la taskbar
+            $screen = [System.Windows.Forms.Screen]::FromControl($form)
+            $form.Bounds = $screen.WorkingArea
+            $form.Tag.Maximized = $true
+        }
+    }
+
 
 	$btnClose = Add-TitleBarButton $main $titleBar "X" @(45, 30) 70 {
 		param($sender, $e)
@@ -938,12 +958,12 @@ function Progressive-Load {
     }
 }
 
+
 ################################################################################
 # MAIN
 ################################################################################
 
 function Main {
-    # Constants for window resizing
     $WM_NCHITTEST = 0x0084
     $HTLEFT = 10
     $HTRIGHT = 11
@@ -954,7 +974,6 @@ function Main {
     $HTBOTTOMLEFT = 16
     $HTBOTTOMRIGHT = 17
 
-    # Add required P/Invoke and custom form class
     Add-Type -ReferencedAssemblies @(
         'System.Windows.Forms',
         'System.Drawing'
@@ -967,102 +986,50 @@ function Main {
     public class Win32 {
         [DllImport("user32.dll")]
         public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
-        
         [DllImport("user32.dll")]
         public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
     }
 
-	public class ResizableForm : Form {
-		private const int WM_NCHITTEST = 0x84;
-		private const int HTLEFT = 10;
-		private const int HTRIGHT = 11;
-		private const int HTTOP = 12;
-		private const int HTTOPLEFT = 13;
-		private const int HTTOPRIGHT = 14;
-		private const int HTBOTTOM = 15;
-		private const int HTBOTTOMLEFT = 16;
-		private const int HTBOTTOMRIGHT = 17;
-		private const int BORDER_WIDTH = 5;
+    public class ResizableForm : Form {
+        private const int BORDER_WIDTH = 0;
 
-		public ResizableForm() {
-			this.FormBorderStyle = FormBorderStyle.None;
-			this.Padding = new Padding(BORDER_WIDTH);
-			this.Resize += new EventHandler(Form_Resize);
-			UpdateFormRegion();
-		}
+        public ResizableForm() {
+            this.FormBorderStyle = FormBorderStyle.None;
+            this.Padding = new Padding(BORDER_WIDTH);
+            this.SetStyle(ControlStyles.ResizeRedraw, true);
+            this.Resize += new EventHandler(Form_Resize);
+            UpdateFormRegion();
+        }
 
-		private void UpdateFormRegion() {
-			using (var path = new System.Drawing.Drawing2D.GraphicsPath()) {
-				var rect = new Rectangle(
-					0,
-					0,
-					this.Width,
-					this.Height
-				);
-				path.AddRectangle(rect);
-				this.Region = new Region(path);
-			}
-		}
+        private void UpdateFormRegion() {
+            // On garde une region, donc la fenêtre est strictement rectangulaire
+            using (var path = new System.Drawing.Drawing2D.GraphicsPath()) {
+                var rect = new Rectangle(0, 0, this.Width, this.Height);
+                path.AddRectangle(rect);
+                this.Region = new Region(path);
+            }
+        }
 
-		private void Form_Resize(object sender, EventArgs e) {
-			this.Invalidate();
-			UpdateFormRegion();
-		}
+        private void Form_Resize(object sender, EventArgs e) {
+            this.Invalidate();
+            UpdateFormRegion();
+        }
 
-		protected override void OnPaint(PaintEventArgs e) {
-			base.OnPaint(e);
-			
-			// Dessiner la bordure
-			using (var pen = new Pen(Color.FromArgb(60, 60, 60), 1)) {
-				var rect = new Rectangle(
-					0,
-					0,
-					this.Width - 1,
-					this.Height - 1
-				);
-				e.Graphics.DrawRectangle(pen, rect);
-			}
-		}
-
-		protected override void WndProc(ref Message m) {
-			base.WndProc(ref m);
-
-			if (m.Msg == WM_NCHITTEST && this.WindowState != FormWindowState.Maximized) {
-				var screenPoint = new Point(m.LParam.ToInt32() & 0xffff, m.LParam.ToInt32() >> 16);
-				var clientPoint = this.PointToClient(screenPoint);
-
-				if (clientPoint.Y <= BORDER_WIDTH) {
-					if (clientPoint.X <= BORDER_WIDTH)
-						m.Result = (IntPtr)HTTOPLEFT;
-					else if (clientPoint.X >= this.Width - BORDER_WIDTH)
-						m.Result = (IntPtr)HTTOPRIGHT;
-					else
-						m.Result = (IntPtr)HTTOP;
-				}
-				else if (clientPoint.Y >= this.Height - BORDER_WIDTH) {
-					if (clientPoint.X <= BORDER_WIDTH)
-						m.Result = (IntPtr)HTBOTTOMLEFT;
-					else if (clientPoint.X >= this.Width - BORDER_WIDTH)
-						m.Result = (IntPtr)HTBOTTOMRIGHT;
-					else
-						m.Result = (IntPtr)HTBOTTOM;
-				}
-				else if (clientPoint.X <= BORDER_WIDTH)
-					m.Result = (IntPtr)HTLEFT;
-				else if (clientPoint.X >= this.Width - BORDER_WIDTH)
-					m.Result = (IntPtr)HTRIGHT;
-			}
-		}
-	}
+        protected override void OnPaint(PaintEventArgs e) {
+            base.OnPaint(e);
+            using (var pen = new Pen(Color.FromArgb(60, 60, 60), 1)) {
+                var rect = new Rectangle(0, 0, this.Width - 1, this.Height - 1);
+                e.Graphics.DrawRectangle(pen, rect);
+            }
+        }
+    }
 '@
 
-    # Function to set window styles
     function Set-WindowLong([IntPtr]$hwnd, $index, $newStyle) {
-        $win32 = [Win32]::GetWindowLong($hwnd, $index)
-        [Win32]::SetWindowLong($hwnd, $index, $win32 -bor $newStyle)
+        $oldStyle = [Win32]::GetWindowLong($hwnd, $index)
+        [Win32]::SetWindowLong($hwnd, $index, ($oldStyle -bor $newStyle))
     }
 
-    # 1) Credentials
     $loaded = Load-GitHubCredentialsFromFile $Script:AuthFilePath
     if (-not $loaded) {
         $res = Build-LoginForm
@@ -1071,16 +1038,14 @@ function Main {
         }
     }
 
-    # 2) Build UI
     $ui = Build-GlobalForm
     $Script:GlobalUI = $ui
-
-    # Add resize functionality
+    
     $ui.Form.Add_Load({
-        Set-WindowLong $this.Handle -16 0x840000
+        # GWL_STYLE = -16
+        Set-WindowLong $this.Handle -16 0x00040000
     })
 
-    # Event: Reset
     $ui.BtnReset.Add_Click({
         if (Test-Path $Script:AuthFilePath) {
             Remove-Item $Script:AuthFilePath -Force
@@ -1089,12 +1054,10 @@ function Main {
         }
     })
 
-    # Event: Refresh => ForceAPI = true
     $ui.BtnRefresh.Add_Click({
         Progressive-Load -ForceAPI $true
     })
 
-    # Radio 14Days
     $ui.Rb14Days.Add_CheckedChanged({
         if ($ui.Rb14Days.Checked) {
             $Script:DisplayAllTime = $false
@@ -1102,7 +1065,6 @@ function Main {
         }
     })
 
-    # Radio AllTime
     $ui.RbAllTime.Add_CheckedChanged({
         if ($ui.RbAllTime.Checked) {
             $Script:DisplayAllTime = $true
@@ -1110,7 +1072,6 @@ function Main {
         }
     })
 
-    # Event: click on main grid => load details
     $ui.DataGrid.Add_CellClick({
         param($sender,$e)
         if ($e.RowIndex -ge 0 -and $e.RowIndex -lt $sender.Rows.Count) {
@@ -1123,7 +1084,6 @@ function Main {
         }
     })
 
-    # Show form and do initial load
     $ui.Form.Add_Shown({
         Progressive-Load -ForceAPI $false
     })
